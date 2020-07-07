@@ -1,0 +1,686 @@
+package parselog
+
+import (
+	"bufio"
+	"github.com/360EntSecGroup-Skylar/excelize/v2"
+	"github.com/lionsoul2014/ip2region/binding/golang/ip2region"
+	log "github.com/sirupsen/logrus"
+	"github.com/spf13/viper"
+	"go_parse_nginx_logs/gtool"
+	"io"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+)
+
+// 要发送的邮件附件
+var Mail_attachment []string
+
+type IPInfo struct {
+	Count       int    //ip访问次数
+	UpTraffic   int    // 上传流量
+	DownTraffic int    //下载流量
+	Zone        string //地区
+}
+
+type URIInfo struct {
+	Count      int // uri访问次数
+	Code2xx    int // code 200的次数
+	Code3xx    int
+	Code4xx    int
+	Code5xx    int
+	UpCode2xx  int // 上游服务器响应码200的次数
+	UpCode3xx  int
+	UpCode4xx  int
+	UpCode5xx  int
+	ReqTimeMin float64 // 请求响应“最小"时间
+	ReqTimeAvg float64 // 请求响应“平均"时间  ，这里存放的其实不是平均值，而是时间总和，之后除以次数，就求出平均值了。
+	ReqTimeMax float64 // 请求响应“最大"时间
+	UpTimeMin  float64 // 上游服务器响应“最小”时间
+	UpTimeAvg  float64
+	UpTimeMax  float64
+}
+type ServerInfo struct {
+	IPsInfoMap       map[string]*IPInfo
+	URISInfo         map[string]*URIInfo
+	UpTrafficTotal   int // 上传总流量
+	DownTrafficTotal int // 下载总流量
+	PV               int // pv
+}
+type ServersInfo struct {
+	Servs map[string]*ServerInfo
+}
+
+type MergeServerName struct {
+	MergeName    string
+	MergeMembers []string
+}
+
+type ConfigNginxLog struct {
+	LogName         string
+	LogSrcPath      string
+	LogOutPath      string
+	IpTop           int
+	UriTop          int
+	Enable          bool // 是否启用
+	MultiServerName bool //是否为all in one 多server_name日志
+	MergeServerName []MergeServerName
+}
+
+//解析配置文件
+func UnmarshalConfigNginx() (configNginxLog []ConfigNginxLog) {
+
+	err := viper.UnmarshalKey("NginxLog", &configNginxLog)
+	if err != nil {
+		log.Fatal(err)
+	}
+	return configNginxLog
+
+}
+
+//分析Nginx日志
+//func ParseNginxLog(wg *sync.WaitGroup, log_file, log_name, out_path string, multiServerName bool, mergeServerName []MergeServerName, ipTop, uriTop int) {
+func ParseNginxLog(wg *sync.WaitGroup, log_file, log_name, out_path string, multiServerName bool, mergeServerName []MergeServerName, ipTop, uriTop int, re *regexp.Regexp) {
+	defer wg.Done()
+	now := time.Now()
+	//加载ip2region
+	region, err2 := ip2region.New("ip2region.db")
+	if err2 != nil {
+		log.Fatalf("ip2region加载失败,报错:%s", err2)
+	}
+	log.Debug("ip2region加载成功......")
+	defer region.Close()
+
+	log.Infof("%s开始日志分析...", log_name)
+	f, err := os.Open(log_file)
+	defer f.Close()
+	if err != nil {
+		log.Errorf("日志:%s无法读取", log_file)
+		return
+	}
+	r := bufio.NewReaderSize(f, 81920)
+	servers_info := new(ServersInfo)
+	servers_info.Servs = make(map[string]*ServerInfo)
+	// 循环读取nginx日志到servers_info struct中
+	ReadNginxLog(r, multiServerName, mergeServerName, log_name, servers_info, region, re)
+	tc := time.Since(now) //计算耗时
+	log.Infof("%s 仅日志分析不包含输出，总共耗时:%v", log_name, tc)
+	// 输出结果到Excel中
+	//var ip_infos_sheet = []string{"ip_by_count", "ip_by_up_traffic", "ip_by_down_traffic"}
+	//var uri_infos_sheet = []string{"uri_by_count", "uri_by_request_time"}
+	//
+	//var tmp_excel_slice []string
+	//log.Debugf("log_name:%s 开始...输出到Excel中....", log_name)
+	//for i, v := range servers_info.Servs {
+	//	tmp_excel_slice = OutPutExcel(i, v, ip_infos_sheet, uri_infos_sheet, ipTop, uriTop, out_path, tmp_excel_slice)
+	//
+	//}
+	//log.Debugf("log_name:%s 结束...输出到Excel中....", log_name)
+	////multiServerName为真时，将所有的excel文件打包为xxx.tar.gz文件
+	//if multiServerName {
+	//
+	//	yesterday := now.AddDate(0, 0, -1).Format(gtool.TIMEFORMAT1)
+	//
+	//	tar_gz := log_name + "_" + yesterday + ".tar.gz"
+	//	tar_gz = filepath.Join(out_path, tar_gz)
+	//	if gtool.FileOrPathExists(tar_gz) {
+	//		err2 := os.Remove(tar_gz)
+	//		if err2 != nil {
+	//			log.Errorf("判断包%v已经存在，重新打包前删除，然删除失败，报错:%v", tar_gz, err2)
+	//		}
+	//	}
+	//	err := archiver.Archive(tmp_excel_slice, tar_gz)
+	//	if err != nil {
+	//		log.Errorf("多server_name结果，打包tar.gz报错:%s", err)
+	//	}
+	//
+	//	Mail_attachment = append(Mail_attachment, tar_gz)
+	//} else {
+	//	Mail_attachment = append(Mail_attachment, tmp_excel_slice[0])
+	//}
+
+}
+
+//循环读取日志，并记录到struct中
+//形参multiServerName判断nginx日志是否按多 server_name来处理
+func ReadNginxLog(r *bufio.Reader, multiServerName bool, mergeServerName []MergeServerName, log_name string, servers_info *ServersInfo, region *ip2region.Ip2Region, re *regexp.Regexp) {
+	count := 0
+	for {
+		count++
+		line, err := gtool.ReadLine(r)
+		if err == io.EOF {
+			break
+		}
+
+		split := strings.Split(line, " | ")
+		//获取IP地址
+		GetIP(split[0], split[16], re)
+
+		//获取主机名，默认去日志的server_name变量，如果multiServerName为false ，则将日志当做一个站点的日志来分析
+		server_name := GetServerName(split[1])
+		if !multiServerName {
+			server_name = log_name
+		} else {
+			if mergeServerName != nil {
+				for _, v := range mergeServerName {
+					if contain, _ := gtool.Contain(server_name, v.MergeMembers); contain {
+						server_name = v.MergeName
+					}
+				}
+			}
+		}
+
+		//获取下载流量
+		GetDownTraffic(split[7])
+		//if !ok {
+		//	continue
+		//}
+		//获取上传流量
+		GetUpTraffic(split[15])
+		//if !ok {
+		//	continue
+		//}
+		//获取uri/api
+		GetURI(split[4])
+		// 获取$status
+		GetStatus(split[5])
+		if err != nil {
+			log.Error(err)
+		}
+		//获取$upstream_status
+		GetUpStatus(split[13])
+		if err != nil {
+			log.Error(err)
+		}
+		//获取$request_time
+		GetRequestTime(split[10])
+		if err != nil {
+			log.Error(err)
+		}
+		//获取$upstream_response_time
+		GetUpstreamTime(split[11])
+		if err != nil {
+			log.Error(err)
+		}
+
+		if count%10000 == 0 {
+			log.Debugf("读取...第%v条日志", count)
+		}
+		//
+		//if _, ok := servers_info.Servs[server_name]; !ok {
+		//	server_info := new(ServerInfo)
+		//	servers_info.Servs[server_name] = server_info
+		//	servers_info.Servs[server_name].IPsInfoMap = make(map[string]*IPInfo)
+		//	servers_info.Servs[server_name].URISInfo = make(map[string]*URIInfo)
+		//}
+		//if _, ok := servers_info.Servs[server_name].IPsInfoMap[ip]; !ok {
+		//	ip_info := new(IPInfo)
+		//	servers_info.Servs[server_name].IPsInfoMap[ip] = ip_info
+		//	ip_zone, err := region.BtreeSearch(ip)
+		//	if err != nil {
+		//		log.Errorf("ip2region没有找到ip所在区域，ip是:%v;log_name:%v", ip, log_name)
+		//	}
+		//	servers_info.Servs[server_name].IPsInfoMap[ip].Zone = ip_zone.String()
+		//}
+		//if _, ok := servers_info.Servs[server_name].URISInfo[uri]; !ok {
+		//	uri_info := new(URIInfo)
+		//	servers_info.Servs[server_name].URISInfo[uri] = uri_info
+		//}
+		//// 填充ipinfo数据
+		//servers_info.Servs[server_name].IPsInfoMap[ip].Count += 1
+		//servers_info.Servs[server_name].IPsInfoMap[ip].UpTraffic += up_traffic
+		//servers_info.Servs[server_name].IPsInfoMap[ip].DownTraffic += down_traffic
+		//servers_info.Servs[server_name].IPsInfoMap[ip].DownTraffic += down_traffic
+		//servers_info.Servs[server_name].UpTrafficTotal += up_traffic
+		//servers_info.Servs[server_name].DownTrafficTotal += down_traffic
+		//servers_info.Servs[server_name].PV += 1
+		//// 填充uriinfo数据
+		//servers_info.Servs[server_name].URISInfo[uri].Count += 1
+		//HandleCode(status_int, up_status_int, servers_info, server_name, uri)
+		//if request_time < servers_info.Servs[server_name].URISInfo[uri].ReqTimeMin {
+		//	servers_info.Servs[server_name].URISInfo[uri].ReqTimeMin = request_time
+		//}
+		//servers_info.Servs[server_name].URISInfo[uri].ReqTimeAvg += request_time
+		//if request_time > servers_info.Servs[server_name].URISInfo[uri].ReqTimeMax {
+		//	servers_info.Servs[server_name].URISInfo[uri].ReqTimeMax = request_time
+		//}
+		//if upstream_resp_time < servers_info.Servs[server_name].URISInfo[uri].UpTimeMin {
+		//	servers_info.Servs[server_name].URISInfo[uri].UpTimeMin = upstream_resp_time
+		//}
+		//servers_info.Servs[server_name].URISInfo[uri].UpTimeAvg += upstream_resp_time
+		//if upstream_resp_time > servers_info.Servs[server_name].URISInfo[uri].UpTimeMax {
+		//	servers_info.Servs[server_name].URISInfo[uri].UpTimeMax = upstream_resp_time
+		//}
+
+		//if count%10000 == 0 {
+		//	log.Debugf("记录...第%v条日志", count)
+		//}
+	}
+
+}
+
+// 处理code统计
+func HandleCode(status_int, up_status_int int, servers_info *ServersInfo, server_name, uri string) {
+	if status_int >= 200 && status_int < 300 {
+		servers_info.Servs[server_name].URISInfo[uri].Code2xx += 1
+	} else if status_int >= 300 && status_int < 400 {
+		servers_info.Servs[server_name].URISInfo[uri].Code3xx += 1
+	} else if status_int >= 400 && status_int < 500 {
+		servers_info.Servs[server_name].URISInfo[uri].Code4xx += 1
+	} else if status_int >= 500 && status_int < 600 {
+		servers_info.Servs[server_name].URISInfo[uri].Code5xx += 1
+	}
+
+	if up_status_int >= 200 && up_status_int < 300 {
+		servers_info.Servs[server_name].URISInfo[uri].UpCode2xx += 1
+	} else if up_status_int >= 300 && up_status_int < 400 {
+		servers_info.Servs[server_name].URISInfo[uri].UpCode3xx += 1
+	} else if up_status_int >= 400 && up_status_int < 500 {
+		servers_info.Servs[server_name].URISInfo[uri].UpCode4xx += 1
+	} else if up_status_int >= 500 && up_status_int < 600 {
+		servers_info.Servs[server_name].URISInfo[uri].UpCode5xx += 1
+	}
+}
+
+//切割后的字符串处理
+func HandleFiled(filed string) string {
+	return strings.Trim(strings.Trim(filed, " "), "\"")
+}
+
+// 日志分析结果输出到excel中
+func OutPutExcel(server_name string, server_info *ServerInfo, ipinfos_sheet, uri_infos_sheet []string, ipTop, uriTop int, out_path string, tmp_excel_slice []string) []string {
+	//创建excel
+	file_excel := excelize.NewFile()
+	// 总流量
+	total_traffic, unit := gtool.TrafficUnitConv(server_info.DownTrafficTotal + server_info.UpTrafficTotal)
+	total_traffic = gtool.Float64get3(total_traffic)
+	// 上传总流量
+	up_traffic_total, up_traffic_unit := gtool.TrafficUnitConv(server_info.UpTrafficTotal)
+	up_traffic_total = gtool.Float64get3(up_traffic_total)
+	// 下载总流量
+	down_traffic_total, down_traffic_unit := gtool.TrafficUnitConv(server_info.DownTrafficTotal)
+	down_traffic_total = gtool.Float64get3(down_traffic_total)
+	// IP总数
+	ip_count := len(server_info.IPsInfoMap)
+	// PV总数
+	pv := server_info.PV
+	// 输出IP_info
+	for _, v := range ipinfos_sheet {
+		file_excel.NewSheet(v)
+		excel_writer, err := file_excel.NewStreamWriter(v)
+		gtool.CheckError(err)
+
+		excel_writer.SetRow("A1", []interface{}{"域名", server_name})
+		excel_writer.SetRow("A2", []interface{}{"IP总数:", ip_count, "PV总数:", pv})
+		excel_writer.SetRow("A3", []interface{}{"总流量:", total_traffic, unit, "上传总流量", up_traffic_total, up_traffic_unit,
+			"下载总流量", down_traffic_total, down_traffic_unit})
+		excel_writer.SetRow("A5", []interface{}{"IP", "访问次数", "上传流量", "单位", "下载流量", "单位", "地区"})
+		SortIPInfo(v, excel_writer, server_info, ipTop)
+
+	}
+	//输出URI_info
+	for _, v := range uri_infos_sheet {
+		file_excel.NewSheet(v)
+		excel_writer, err := file_excel.NewStreamWriter(v)
+		gtool.CheckError(err)
+		excel_writer.SetRow("A1", []interface{}{"域名", server_name})
+		excel_writer.SetRow("A3", []interface{}{"URI",
+			"访问次数",
+			"code_2xx",
+			"code_3xx",
+			"code_4xx",
+			"code_5xx",
+			"up_code_2xx",
+			"up_code_3xx",
+			"up_code_4xx",
+			"up_code_5xx",
+			"req_time_min",
+			"req_time_avg",
+			"req_time_max",
+			"upstream_time_min",
+			"upstream_time_avg",
+			"upstream_time_max",
+		})
+
+		SortURIInfo(v, server_info, excel_writer, uriTop)
+	}
+
+	// 保存excel
+	now := time.Now()
+	yesterday := now.AddDate(0, 0, -1).Format(gtool.TIMEFORMAT1)
+	file_excel.DeleteSheet("Sheet1")
+	excel_name := server_name + "_" + yesterday + ".xlsx"
+	excel_name = filepath.Join(out_path, excel_name)
+	if err2 := file_excel.SaveAs(excel_name); err2 != nil {
+		log.Error(err2)
+	}
+	tmp_excel_slice = append(tmp_excel_slice, excel_name)
+	return tmp_excel_slice
+}
+
+//排序输出IP_info
+func SortIPInfo(ip_info_sheet string, excel_writer *excelize.StreamWriter, server_info *ServerInfo, ipTop int) {
+
+	var ss []gtool.SortKVint
+	switch ip_info_sheet {
+	case "ip_by_count":
+		for ip, v := range server_info.IPsInfoMap {
+			ss = append(ss, gtool.SortKVint{Key: ip, Value: v.Count})
+		}
+
+	case "ip_by_up_traffic":
+		for ip, v := range server_info.IPsInfoMap {
+			ss = append(ss, gtool.SortKVint{Key: ip, Value: v.UpTraffic})
+		}
+
+	case "ip_by_down_traffic":
+		for ip, v := range server_info.IPsInfoMap {
+			ss = append(ss, gtool.SortKVint{Key: ip, Value: v.DownTraffic})
+		}
+
+	}
+	sort.Slice(ss, func(i, j int) bool {
+		return ss[i].Value > ss[j].Value
+	})
+
+	var count = 0
+	for ii, vv := range ss {
+		// 单个ip的计数
+		ip_count := server_info.IPsInfoMap[vv.Key].Count
+		// 单个ip的上传流量
+		ip_up_traffic := server_info.IPsInfoMap[vv.Key].UpTraffic
+		ip_up_traffic_float, ip_up_traffic_float_unit := gtool.TrafficUnitConv(ip_up_traffic)
+		ip_up_traffic_float = gtool.Float64get3(ip_up_traffic_float)
+
+		// 单个ip的下载流量
+		ip_down_traffic := server_info.IPsInfoMap[vv.Key].DownTraffic
+		ip_down_traffic_float, ip_down_traffic_float_unit := gtool.TrafficUnitConv(ip_down_traffic)
+		ip_down_traffic_float = gtool.Float64get3(ip_down_traffic_float)
+
+		// 单个ip的地区
+		ip_zone := server_info.IPsInfoMap[vv.Key].Zone
+
+		excel_writer.SetRow("A"+strconv.Itoa(ii+6), []interface{}{
+			vv.Key,
+			ip_count,
+			ip_up_traffic_float,
+			ip_up_traffic_float_unit,
+			ip_down_traffic_float,
+			ip_down_traffic_float_unit,
+			ip_zone,
+		})
+
+		if ipTop > 0 {
+			count++
+			if count >= ipTop {
+				break
+			}
+		}
+	}
+	if err := excel_writer.Flush(); err != nil {
+		log.Error(err)
+	}
+}
+
+//排序输出URI_info
+//	var uriinfos_sheet = []string{"uri_by_count", "uri_by_request_time"}
+func SortURIInfo(uri_info_sheet string, server_info *ServerInfo, excel_writer *excelize.StreamWriter, uriTop int) {
+	var ss []gtool.SortKVint
+	var ss1 []gtool.SortKVFloat
+	var count = 0
+	switch uri_info_sheet {
+	case "uri_by_count":
+		for uri, v := range server_info.URISInfo {
+			ss = append(ss, gtool.SortKVint{Key: uri, Value: v.Count})
+		}
+		sort.Slice(ss, func(i, j int) bool {
+			return ss[i].Value > ss[j].Value
+		})
+
+		for ii, vv := range ss {
+			// 单个uri的计数
+			uri_count := server_info.URISInfo[vv.Key].Count
+			//	单个uri的code_2xx计数
+			code_2xx := server_info.URISInfo[vv.Key].Code2xx
+			code_3xx := server_info.URISInfo[vv.Key].Code3xx
+			code_4xx := server_info.URISInfo[vv.Key].Code4xx
+			code_5xx := server_info.URISInfo[vv.Key].Code5xx
+			//	 单个uri的up_code_2xx计数
+			up_code_2xx := server_info.URISInfo[vv.Key].UpCode2xx
+			up_code_3xx := server_info.URISInfo[vv.Key].UpCode3xx
+			up_code_4xx := server_info.URISInfo[vv.Key].UpCode4xx
+			up_code_5xx := server_info.URISInfo[vv.Key].UpCode5xx
+
+			//	单个uri的request_time
+			req_time_min := server_info.URISInfo[vv.Key].ReqTimeMin
+			req_time_avg := gtool.Float64get3(server_info.URISInfo[vv.Key].ReqTimeAvg / float64(uri_count))
+			req_time_max := server_info.URISInfo[vv.Key].ReqTimeMax
+
+			//	单个uri的upstreamt_time
+			upstream_time_min := server_info.URISInfo[vv.Key].UpTimeMin
+			upstream_time_avg := gtool.Float64get3(server_info.URISInfo[vv.Key].UpTimeAvg / float64(uri_count))
+			upstream_time_max := server_info.URISInfo[vv.Key].UpTimeMax
+
+			excel_writer.SetRow("A"+strconv.Itoa(ii+4), []interface{}{
+				vv.Key,
+				uri_count,
+				code_2xx,
+				code_3xx,
+				code_4xx,
+				code_5xx,
+				up_code_2xx,
+				up_code_3xx,
+				up_code_4xx,
+				up_code_5xx,
+				req_time_min,
+				req_time_avg,
+				req_time_max,
+				upstream_time_min,
+				upstream_time_avg,
+				upstream_time_max,
+			})
+
+			if uriTop > 0 {
+				count++
+				if count >= uriTop {
+					break
+				}
+			}
+		}
+
+	case "uri_by_request_time":
+		for uri, v := range server_info.URISInfo {
+			ss1 = append(ss1, gtool.SortKVFloat{Key: uri, Value: v.ReqTimeMax})
+		}
+		sort.Slice(ss1, func(i, j int) bool {
+			return ss1[i].Value > ss1[j].Value
+		})
+
+		for ii, vv := range ss1 {
+			// 单个uri的计数
+			uri_count := server_info.URISInfo[vv.Key].Count
+			//	单个uri的code_2xx计数
+			code_2xx := server_info.URISInfo[vv.Key].Code2xx
+			code_3xx := server_info.URISInfo[vv.Key].Code3xx
+			code_4xx := server_info.URISInfo[vv.Key].Code4xx
+			code_5xx := server_info.URISInfo[vv.Key].Code5xx
+			//	 单个uri的up_code_2xx计数
+			up_code_2xx := server_info.URISInfo[vv.Key].UpCode2xx
+			up_code_3xx := server_info.URISInfo[vv.Key].UpCode3xx
+			up_code_4xx := server_info.URISInfo[vv.Key].UpCode4xx
+			up_code_5xx := server_info.URISInfo[vv.Key].UpCode5xx
+
+			//	单个uri的request_time
+			req_time_min := server_info.URISInfo[vv.Key].ReqTimeMin
+			req_time_avg := gtool.Float64get3(server_info.URISInfo[vv.Key].ReqTimeAvg / float64(uri_count))
+			req_time_max := server_info.URISInfo[vv.Key].ReqTimeMax
+
+			//	单个uri的upstreamt_time
+			upstream_time_min := server_info.URISInfo[vv.Key].UpTimeMin
+			upstream_time_avg := gtool.Float64get3(server_info.URISInfo[vv.Key].UpTimeAvg / float64(uri_count))
+			upstream_time_max := server_info.URISInfo[vv.Key].UpTimeMax
+
+			excel_writer.SetRow("A"+strconv.Itoa(ii+4), []interface{}{
+				vv.Key,
+				uri_count,
+				code_2xx,
+				code_3xx,
+				code_4xx,
+				code_5xx,
+				up_code_2xx,
+				up_code_3xx,
+				up_code_4xx,
+				up_code_5xx,
+				req_time_min,
+				req_time_avg,
+				req_time_max,
+				upstream_time_min,
+				upstream_time_avg,
+				upstream_time_max,
+			})
+
+			if uriTop > 0 {
+				count++
+				if count >= uriTop {
+					break
+				}
+			}
+		}
+
+	}
+
+	if err := excel_writer.Flush(); err != nil {
+		log.Error(err)
+	}
+
+}
+
+//获取ip地址
+//((2(5[0-5]|[0-4]\d))|[0-1]?\d{1,2})(\.((2(5[0-5]|[0-4]\d))|[0-1]?\d{1,2})){3}
+//^(([1-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.)(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){2}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$
+func GetIP(realIP, remoteAddr string, re *regexp.Regexp) string {
+	realIP = HandleFiled(realIP)
+	remoteAddr = HandleFiled(remoteAddr)
+	if re.MatchString(realIP) {
+		return realIP
+	}
+	return remoteAddr
+
+}
+
+//func GetIP(realIP, remoteAddr string) string {
+//	realIP = HandleFiled(realIP)
+//	remoteAddr = HandleFiled(remoteAddr)
+//	regStr := `^(([1-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.)(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){2}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$`
+//	if match, _ := regexp.MatchString(regStr, realIP); match {
+//		return realIP
+//	}
+//	return remoteAddr
+//
+//}
+
+//获取主机名server_name
+func GetServerName(serverName string) string {
+	serverName = HandleFiled(serverName)
+	if serverName != "" && serverName != "-" {
+		return serverName
+	}
+	return "default"
+}
+
+//$bytes_sent 获取下载流量
+func GetDownTraffic(downTraffic string) (int, bool) {
+	downTraffic = HandleFiled(downTraffic)
+	if downTraffic != "" && downTraffic != "-" {
+		down_traffic, err := strconv.Atoi(downTraffic)
+		if err != nil {
+			log.Errorf("下载流量字符串转int报错:%s", err)
+			return 0, false
+		}
+		return down_traffic, true
+	}
+	return 0, false
+}
+
+//$request_length 获取上传流量
+func GetUpTraffic(upTraffic string) (int, bool) {
+	upTraffic = HandleFiled(upTraffic)
+	if upTraffic != "" && upTraffic != "-" {
+		up_traffic, err := strconv.Atoi(upTraffic)
+		if err != nil {
+			return 0, false
+		}
+		return up_traffic, true
+	}
+	return 0, false
+
+}
+
+//获取api/uri地址
+/*
+注意，nginx日志中出现过"GET HTTP/1.1"的日志
+*/
+func GetURI(url string) string {
+	url = HandleFiled(url)
+	url_slice := strings.Split(url, " ")
+	if len(url_slice) < 3 {
+		return "/"
+	}
+	url = strings.Split(url_slice[1], "?")[0]
+	return url
+
+}
+
+//获取状态吗$status
+func GetStatus(status string) (int, error) {
+	status = HandleFiled(status)
+	status_int, err := strconv.Atoi(status)
+	if err != nil {
+		return status_int, err
+	}
+	return status_int, nil
+}
+
+// 获取上游服务器返回的状态码
+func GetUpStatus(upStatus string) (int, error) {
+	upStatus = HandleFiled(upStatus)
+	if upStatus != "-" && upStatus != "" {
+		upStatus_int, err := strconv.Atoi(upStatus)
+		if err != nil {
+			return 0, err
+		}
+		return upStatus_int, nil
+
+	}
+	return 0, nil
+
+}
+
+//获取$request_time
+func GetRequestTime(request_time string) (float64, error) {
+	request_time = HandleFiled(request_time)
+	float, err := strconv.ParseFloat(request_time, 64)
+	if err != nil {
+		return 0, err
+	}
+	return float, nil
+
+}
+
+//获取$upstream_response_time
+func GetUpstreamTime(upstream_time string) (float64, error) {
+	upstream_time = HandleFiled(upstream_time)
+	if upstream_time != "" && upstream_time != "-" {
+		float, err := strconv.ParseFloat(upstream_time, 64)
+		if err != nil {
+			return 0, err
+		}
+		return float, nil
+	}
+	return 0, nil
+}

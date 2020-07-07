@@ -1,0 +1,113 @@
+package main
+
+import (
+	"fmt"
+	"github.com/lionsoul2014/ip2region/binding/golang/ip2region"
+	log "github.com/sirupsen/logrus"
+	"go_parse_nginx_logs/gtool"
+	"go_parse_nginx_logs/parselog"
+	"gopkg.in/gomail.v2"
+	"mime"
+	"os"
+	"path"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+)
+
+/*
+'"$clientRealIp" | "$server_name" | "$remote_user" | "[$time_local]" | "$request" | '
+'"$status" | "$body_bytes_sent" | "$bytes_sent" | "$http_referer" | "$http_user_agent" | '
+'"$request_time" | "$upstream_response_time" | "$upstream_addr" |
+"$upstream_status" | "$uid_got" | "$request_length" | "$remote_addr"';
+*/
+
+func init() {
+	gtool.InitGtool()
+}
+
+func main() {
+	startT := time.Now() //计算当前时间
+	log.Info("Nginx日志分析开始运行......")
+	var wg sync.WaitGroup
+
+	//加载ip2region
+	region, err2 := ip2region.New("ip2region.db")
+	if err2 != nil {
+		log.Fatalf("ip2region加载失败,报错:%s", err2)
+	}
+	log.Debug("ip2region加载成功......")
+	defer region.Close()
+	//now := time.Now()
+	yesterday := startT.AddDate(0, 0, -1).Format(gtool.TIMEFORMAT1)
+	//解析日志分析配置
+	configNginx := parselog.UnmarshalConfigNginx()
+	for _, v := range configNginx {
+		if !v.Enable {
+			log.Infof("日志: %s 分析被禁", v.LogName)
+			continue
+		}
+		//日志输出路径
+		logOutPut := v.LogOutPath
+		if ok := gtool.FileOrPathExists(logOutPut); !ok {
+			//	创建文件夹
+			err2 := os.MkdirAll(logOutPut, os.ModePerm)
+			if err2 != nil {
+				log.Errorf("输出日志文件夹不存在，且创建输出日志文件夹%s失败，报错:%s", logOutPut, err2)
+			}
+		}
+		//日志文件源
+		logSrcPath := v.LogSrcPath
+		log.Debugf("日志文件源:%s", logSrcPath)
+		logFileName := strings.Replace(path.Base(logSrcPath), "yyyy-mm-dd", yesterday, 1)
+		logFilePath := filepath.Join(filepath.Dir(logSrcPath), logFileName)
+		log.Debugf("分析的Nginx日志: %s", logFilePath)
+		if !gtool.FileOrPathExists(logFilePath) {
+			log.Errorf("分析日志%s,该日志不存在，请检查问题!", logFilePath)
+			continue
+		}
+		logName := v.LogName
+		log.Debugf("配置参数:logName:%s", logName)
+		multiServerName := v.MultiServerName
+		log.Debugf("配置参数:multiServerName:%v", multiServerName)
+		MergeServerName := v.MergeServerName
+		log.Debugf("配置参数:MergeServerName:%v", MergeServerName)
+		ipTop := v.IpTop
+		log.Debugf("配置参数:ipTop:%v", ipTop)
+		uriTop := v.UriTop
+		log.Debugf("配置参数:uriTop:%v", uriTop)
+		wg.Add(1)
+		go parselog.ParseNginxLog(&wg, logFilePath, logName, logOutPut, multiServerName, MergeServerName, region, ipTop, uriTop)
+
+	}
+	wg.Wait()
+	tc := time.Since(startT) //计算耗时
+	log.Infof("分析日志并送出到Excel总耗时:%v", tc)
+	if !gtool.Email_enable {
+		log.Info("发送邮件被禁用...,日志分析结束")
+		return
+	}
+	// 发送邮件
+	emailObj := gtool.NewEmailObj()
+	sendEmail := gtool.NewSentEmail()
+
+	for _, v := range parselog.Mail_attachment {
+		file_name := filepath.Base(v)
+		log.Debugf("发送的附件名为:%s", file_name)
+		emailObj.Attach(v,
+			gomail.Rename(file_name),
+			gomail.SetHeader(map[string][]string{
+				"Content-Disposition": []string{
+					fmt.Sprintf(`attachment; filename="%s"`, mime.QEncoding.Encode("UTF-8", file_name)),
+				},
+			}),
+		)
+		log.Debugf("邮件附件:%v", v)
+	}
+	if err := sendEmail.DialAndSend(emailObj); err != nil {
+		log.Errorf("发送邮件失败:%", err)
+	}
+	log.Info("日志分析并发送邮件,结束...")
+
+}

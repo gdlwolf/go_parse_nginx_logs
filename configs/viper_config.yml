@@ -1,0 +1,86 @@
+app:
+  name: Nginx日志分析脚本
+log:
+  level: debug
+  # 日志“仅”输出到控制台:console,“仅”输出到文件:file,"同时“输出到控制台和文件:cfile
+  out: console
+  # 日志输出文件路径
+  logFile: ./logs/app.log
+  # 最大日志文件，单位MB
+  maxSize: 10
+  # 最大过期日志保留的个数
+  maxBackups: 3
+  # 保留过期文件的最大时间间隔,单位是天
+  maxAge: 10
+  # 是否启用日志压缩false or true
+  compress: true
+
+email:
+  # 是否启用发送邮件 true:启用，false：不启用
+  enable: false
+  # 发送者邮箱,仅设置一个
+  from: gdlwolf@163.com
+  # 收件人地址
+  to:
+    - gdlwolf@163.com
+    - 14246012@qq.com
+  # 邮件标题
+  subject: Nginx日志分析
+  # smtp地址
+  smtp: smtp.163.com
+  # smtp端口号一般情况非tls是25，tls是：465/994
+  smtpPort: 465
+  # 邮箱账号
+  smtpAccount: gdlwolf@163.com
+  # 邮箱密码或者邮箱授权码
+  smtpPassWord: NHXSXIZDJWVQJFSN
+
+# 通用配置
+Common:
+  # 分析几天前的日志？默认为-1，即分析1天前（昨天）的日志。2天前即-2，依次类推。
+  daysAgo: -4
+
+#日志分析相关配置
+NginxLog:
+  # 名字随意，只是为了方便自己维护，logname必须是唯一！！！不能有重复
+  - logname: 外语平台-测试
+    # 是否启用日志分析，true：启用。false：不启用
+    enable: true
+
+    # 想要分析的nginx日志所在的路径，以及“日志文件名的格式”，必须是“文件名+yyyy-mm-dd+扩展名”的形似，主要是其中的yyyy-mm-dd。
+    # 因为nginx日志路径下方可能有多份日志，依靠文件格式中的yyyy-mm-dd来区别要分析的是哪个具体的日志文件。
+    logSrcPath: E:/gdlwolf_develop/golang/go_parse_nginx_logs/examples_logs/qh_waiyupingtai_yyyy-mm-dd.log
+    # 分析日志的输出路径
+    logOutPath: E:/gdlwolf_develop/golang/go_parse_nginx_logs/excel
+
+    # web前方是否有cdn，如果没有cdn，则采用$remote_addr统计ip
+    # 如果有cdn，则统计ip地址时，会使用x_forwarded_for的第一个ip地址来统计（该值可能是伪造的）,如果第一个ip地址有异常，例如是私有ip地址，或者不完整，非正常ip，或者根本没有为空，则使用$remote_addr统计
+    cdn: true
+
+    # ipTop和uriTop是当访问日志中的ip和uri数量太多，那么设置top后，excel结果中只输出Top-N,如果为0，则不限制
+    ipTop: 200
+    uriTop: 100
+
+    # 统计UV时使用的用户唯一标识。这个值是个yaml数组。名字是“cookie_xxx"或者"uri_xxx"。
+    # 以cookie_开头的代表以某个cookie作为用户唯一标识。
+    # 以uri_开头的代表以URI中的某个参数args为用户唯一标识来统计UV。
+    # 当设置了多个UVKey时，会从左到右，依次判断，如果都没有则以ip为用户唯一标识来统计UV。
+    # cookie_ 和uri_ 必须是小写！！！！！！！
+    UVKey: ["cookie_jsid","cookie__nx_","uri_mysessionid"]
+    # 是否发送邮件通知，默认为false
+    sendEmail: false
+    # 如果nginxlog中是多个serverName的集合，想将各个不同的Server_name分开统计结果，则设置为true。如果将nginxlog当成一个server_name，则设置为false
+    # 注意！！！：当multiServerName开启时，生成的多个excel结果文件会被打包成一个xxx.tar.gz文件。如果为false，则不会打包压缩唯一的exccel文件。
+    multiServerName: false
+    # 当multiServerName=1时，该配置项才可能有效。如果不需要合并server_name,则把下面注释掉即可。
+    # mergeServerName：是当NginxLog中有多个servername日志（all in one）的时候，然而，又想合并某些域名的统计结果到一个结果中。则可以配置如下：
+#    mergeServerName:
+#      # 这个名字随意，主要是为了在统计结果中展示，方便你能区分这个分析结果是哪个站点的
+#      # mergeName必须是唯一的！！！不能有重复的。
+#      - mergeName: www.ieeac-world.com
+#        # 想将哪些server_name合并到一起。
+#        mergeMembers: ["www.ieeac-world.com","admin.ieeac-world.com"]
+#      - mergeName: wap.ieeac-world.com
+#        mergeMembers: ["wap.ieeac-world.com","localhost"]
+
+

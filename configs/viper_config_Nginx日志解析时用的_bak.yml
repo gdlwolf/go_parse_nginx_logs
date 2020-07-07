@@ -1,0 +1,54 @@
+app:
+  name: "hehe321"
+log:
+  level: debug
+  # 日志“仅”输出到控制台:console,“仅”输出到文件:file,"同时“输出到控制台和文件:cfile
+  out: console
+  logfile: ./logs/abc.log
+
+#日志分析相关配置
+NginxLog:
+  # 名字随意，只是为了方便自己维护，logname必须是唯一！！！不能有重复
+  - logname: "联通沃云Nginx日志"
+    # 想要分析的nginx日志所在的路径，以及“日志文件名的格式”，必须是“文件名+yyyy-mm-dd+扩展名”的形似，主要是其中的yyyy-mm-dd。
+    # 因为nginx日志路径下方可能有多份日志，依靠文件格式中的yyyy-mm-dd来区别要分析的是哪个具体的日志文件。
+    logSrcPath: "E:/gdlwolf_develop/golang/go_parse_nginx_logs/examples_logs/zty_woyun_nginx_yyyy-mm-dd.log"
+    # 分析日志的输出路径
+    logOutPath: "E:/gdlwolf_develop/golang/go_parse_nginx_logs/excel"
+    # 是否启用日志分析，不启用：0，启用:1。默认为不启用！
+    enable: 1
+    # 如果nginxlog中是多个serverName的集合，想将各个不同的Server_name分开统计结果，则设置为1。如果将nginxlog当成一个server_name，则设置为0。
+    multiServerName: 1
+    # 当multiServerName=1时，该配置项才可能有效。
+    # mergeServerName：是当NginxLog中有多个servername日志（all in one）的时候，然而，又想合并某些域名的统计结果到一个结果中。则可以配置如下：
+    mergeServerName:
+      # 这个名字随意，主要是为了在统计结果中展示，方便你能区分这个分析结果是哪个站点的
+      # mergeName必须是唯一的！！！不能有重复的。
+      - mergeName: "class.52tsing.com"
+        # 想将哪些server_name合并到一起。
+        mergeMembers: ["class.52tsing.com","classadmin.52tsing.com","classwx.52tsing.com"]
+      - mergeName: "online.52tsing.com"
+        mergeMembers: ["online.52tsing.com","onlineadmin.52tsing.com"]
+  # 名字随意，只是为了方便自己维护，logname必须是唯一！！！不能有重复
+  - logname: "test2"
+    # 想要分析的nginx日志所在的路径，以及“日志文件名的格式”，必须是“文件名+yyyy-mm-dd+扩展名”的形似，主要是其中的yyyy-mm-dd。
+    # 因为nginx日志路径下方可能有多份日志，依靠文件格式中的yyyy-mm-dd来区别要分析的是哪个具体的日志文件。
+    logSrcPath: "E:/test2/test2_yyyy-mm-dd.log"
+    # 分析日志的输出路径
+    logOutPath: "E:/test2out"
+    # 是否启用日志分析，不启用：0，启用:1。默认为不启用！
+    enable: 0
+    # 如果nginxlog中是多个serverName的集合，想将各个不同的Server_name分开统计结果，则设置为1。如果将nginxlog当成一个server_name，则设置为0。
+    # 默认为 0
+    multiServerName: 0
+    # 当multiServerName=1时，该配置项才可能有效。
+    # mergeServerName：是当NginxLog中有多个servername日志（all in one）的时候，然而，又想合并某些域名的统计结果到一个结果中。则可以配置如下：
+    mergeServerName:
+      # 这个名字随意，主要是为了在统计结果中展示，方便你能区分这个分析结果是哪个站点的
+      # mergeName必须是唯一的！！！不能有重复的。
+      - mergeName: "test2-1"
+        # 想将哪些server_name合并到一起。
+        mergeMembers: ["test2-1-1","test2-1-2"]
+      - mergeName: "test2-2"
+        mergeMembers: ["test2-2-1","test2-2-2"]
+

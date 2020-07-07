@@ -1,0 +1,15 @@
+package main
+
+import (
+	"fmt"
+	"github.com/spf13/viper"
+	"go_parse_nginx_logs/gtool"
+)
+
+func init() {
+	gtool.InitGtool()
+}
+func main() {
+	getInt := viper.GetInt("Common.daysAgo")
+	fmt.Println(getInt)
+}

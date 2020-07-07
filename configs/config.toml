@@ -1,0 +1,21 @@
+# This is a TOML document.
+title = "TOML Example"
+
+[applog]
+# 日志级别
+level = "debug"
+# 日志“仅”输出到控制台:console,“仅”输出到文件:file,"同时“输出到控制台和文件:cfile
+out = "console"
+logFile = "./logs/abc.log"
+
+
+[nginxlog]
+
+  #
+  [nginxlog.log1]
+  logSrcPath = "/hehe"
+  logOutPath = "/lala"
+
+  [nginxlog.log2]
+  logSrcPath = "/niubi"
+  logOutPath = "/niubiaaa"
